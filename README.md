@@ -19,8 +19,10 @@ claude-memory-sync/
 │   ├── MEMORY.md              ← шаблон индекса
 │   └── EXAMPLE.md             ← как оформлять записи памяти
 ├── skills/
-│   └── setup-memory-sync/
-│       └── SKILL.md           ← /setup-memory-sync — разворачивает всё одной командой
+│   ├── setup-memory-sync/
+│   │   └── SKILL.md           ← /setup-memory-sync — разворачивает кит на новой машине
+│   └── claude-memory-sync/
+│       └── SKILL.md           ← save/pull/status/resolve — повседневная работа с memory-репо
 ├── setup/
 │   ├── README.md              ← пошаговая инструкция для человека
 │   ├── mac.sh                 ← установка на macOS

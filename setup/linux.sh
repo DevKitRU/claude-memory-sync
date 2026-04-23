@@ -181,21 +181,30 @@ fi
 
 fi   # end of SYMLINK_READY block
 
-# ——— Шаг 5: скил (идемпотентно)
-info "Шаг 5/7: установка скила /setup-memory-sync"
-SKILL_SRC="$REPO_DIR/skills/setup-memory-sync"
-SKILL_DST="$HOME/.claude/skills/setup-memory-sync"
-if [[ -d "$SKILL_SRC" ]]; then
-    mkdir -p "$HOME/.claude/skills"
-    if [[ -L "$SKILL_DST" ]]; then
-        rm "$SKILL_DST"
-    elif [[ -d "$SKILL_DST" ]]; then
-        mv "$SKILL_DST" "${SKILL_DST}.backup-$TIMESTAMP"
-    fi
-    ln -s "$SKILL_SRC" "$SKILL_DST"
-    ok "Скил: $SKILL_DST → $SKILL_SRC"
+# ——— Шаг 5: скилы (идемпотентно — цикл по всем skills/*)
+info "Шаг 5/7: установка скилов"
+SKILLS_SRC_DIR="$REPO_DIR/skills"
+SKILLS_DST_DIR="$HOME/.claude/skills"
+
+if [[ -d "$SKILLS_SRC_DIR" ]]; then
+    mkdir -p "$SKILLS_DST_DIR"
+    installed=0
+    for skill_path in "$SKILLS_SRC_DIR"/*; do
+        [[ -d "$skill_path" ]] || continue
+        skill_name=$(basename "$skill_path")
+        dst="$SKILLS_DST_DIR/$skill_name"
+        if [[ -L "$dst" ]]; then
+            rm "$dst"
+        elif [[ -d "$dst" ]]; then
+            mv "$dst" "${dst}.backup-$TIMESTAMP"
+        fi
+        ln -s "$skill_path" "$dst"
+        echo "  + /$skill_name"
+        installed=$((installed + 1))
+    done
+    ok "Скилов установлено: $installed"
 else
-    warn "Скил не найден в репо (пропущу)"
+    warn "Папка $SKILLS_SRC_DIR не найдена — скилы не установлены"
 fi
 
 # ——— Шаг 6: cron wrapper-скрипт + запись (идемпотентно)

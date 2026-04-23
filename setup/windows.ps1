@@ -190,27 +190,33 @@ if (-not $JunctionReady) {
 
 }   # end of JunctionReady block
 
-# ——— Шаг 5: скил (идемпотентно)
-Write-Info "Шаг 5/7: установка скила /setup-memory-sync"
-$SkillSrc = Join-Path $RepoDir "skills\setup-memory-sync"
-$SkillDst = Join-Path $env:USERPROFILE ".claude\skills\setup-memory-sync"
-if (Test-Path $SkillSrc) {
-    $skillsParent = Join-Path $env:USERPROFILE ".claude\skills"
-    if (-not (Test-Path $skillsParent)) {
-        New-Item -ItemType Directory -Path $skillsParent -Force | Out-Null
+# ——— Шаг 5: скилы (идемпотентно — цикл по всем skills/*)
+Write-Info "Шаг 5/7: установка скилов"
+$SkillsSrc = Join-Path $RepoDir "skills"
+$SkillsDst = Join-Path $env:USERPROFILE ".claude\skills"
+
+if (Test-Path $SkillsSrc) {
+    if (-not (Test-Path $SkillsDst)) {
+        New-Item -ItemType Directory -Path $SkillsDst -Force | Out-Null
     }
-    if (Test-Path $SkillDst) {
-        $skItem = Get-Item $SkillDst -Force
-        if ($skItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            Remove-Item $SkillDst -Force
-        } else {
-            Move-Item $SkillDst "$SkillDst.backup-$Timestamp"
+    $installed = 0
+    foreach ($skillDir in (Get-ChildItem $SkillsSrc -Directory)) {
+        $dst = Join-Path $SkillsDst $skillDir.Name
+        if (Test-Path $dst) {
+            $dstItem = Get-Item $dst -Force
+            if ($dstItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                Remove-Item $dst -Force
+            } else {
+                Move-Item $dst "$dst.backup-$Timestamp"
+            }
         }
+        New-Item -ItemType Junction -Path $dst -Target $skillDir.FullName | Out-Null
+        Write-Host "  + /$($skillDir.Name)"
+        $installed++
     }
-    New-Item -ItemType Junction -Path $SkillDst -Target $SkillSrc | Out-Null
-    Write-Ok "Скил: $SkillDst -> $SkillSrc"
+    Write-Ok "Скилов установлено: $installed"
 } else {
-    Write-WarnMsg "Скил не найден в репо (пропущу)"
+    Write-WarnMsg "Папка $SkillsSrc не найдена — скилы не установлены"
 }
 
 # ——— Шаг 6: Task Scheduler (идемпотентно)
