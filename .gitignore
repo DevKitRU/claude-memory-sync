@@ -14,5 +14,30 @@ desktop.ini
 *.backup
 *.orig
 
-# Memory repo users may clone this template and add real memory — the real memory
-# repo should have its OWN .gitignore. This file protects the template itself.
+# ————————————————————————————————————————————
+# Секреты (на случай если случайно скопируешь .env в этот репо или в свой
+# приватный memory-репо, использующий такой же .gitignore-шаблон)
+# ————————————————————————————————————————————
+*.env
+*.env.*
+.env
+.envrc
+
+secrets/
+.secrets/
+.credentials/
+
+# Ключи
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*_rsa
+*_ed25519
+
+# Сертификаты с приватной частью
+*.jks
+*.keystore

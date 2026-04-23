@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
 # Claude Memory Sync — Linux (VPS) setup
 #
-# Превращает локальную папку памяти Claude в симлинк на git-репо claude-memory.
+# Превращает локальную папку памяти Claude в симлинк на git-репо с твоей памятью.
 # Идемпотентен: повторный запуск не ломает.
 #
 # Использование:
-#   cd ~/claude-memory-sync      (или где клонирован репо)
+#   cd ~/claude-memory-sync   (или где клонирован этот кит)
 #   ./setup/linux.sh
-#
-# Что делает:
-#   1. Проверяет что git-репо на месте
-#   2. Находит реальную папку памяти Claude (~/.claude/projects/-home-<user>/memory)
-#   3. Бэкапит её в ~/claude-memory-sync-backup-<timestamp>
-#   4. Мержит уникальные файлы в git-репо
-#   5. Заменяет папку симлинком на git-репо
-#   6. Настраивает auto-pull через cron (каждые 5 мин)
-#   7. Тестирует запись через симлинк
 
 set -euo pipefail
 
@@ -34,30 +25,88 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GIT_MEMORY="$REPO_DIR/memory"
 
-USER_HOME_ENCODED="-home-$(whoami)"
-CLAUDE_MEMORY="$HOME/.claude/projects/$USER_HOME_ENCODED/memory"
-
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR="$HOME/claude-memory-backup-$TIMESTAMP"
 
+# ——— Discovery активной папки памяти Claude
+discover_claude_memory() {
+    local projects_dir="$HOME/.claude/projects"
+
+    if [[ ! -d "$projects_dir" ]]; then
+        err "Папка проектов Claude не найдена: $projects_dir"
+        err ""
+        err "Запусти Claude Code хотя бы раз:"
+        err "  cd <куда будешь работать с памятью>"
+        err "  claude"
+        err "Потом запусти этот скрипт снова."
+        exit 1
+    fi
+
+    local candidates=()
+    while IFS= read -r -d '' dir; do
+        candidates+=("$dir")
+    done < <(find "$projects_dir" -mindepth 1 -maxdepth 1 -type d -print0)
+
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        err "В $projects_dir нет ни одного проекта Claude."
+        err "Запусти Claude Code хотя бы раз, потом этот скрипт снова."
+        exit 1
+    fi
+
+    if [[ ${#candidates[@]} -eq 1 ]]; then
+        echo "${candidates[0]}/memory"
+        return 0
+    fi
+
+    echo "" >&2
+    echo "Claude Code запускался из нескольких директорий." >&2
+    echo "Выбери ту из которой хочешь синхронизировать память:" >&2
+    echo "" >&2
+    local i=1
+    for dir in "${candidates[@]}"; do
+        local name
+        name=$(basename "$dir")
+        local decoded
+        decoded=$(echo "$name" | sed 's|^-||; s|-|/|g')
+        echo "  $i) $name" >&2
+        echo "       = /$decoded" >&2
+        i=$((i+1))
+    done
+    echo "" >&2
+    printf "Номер (1-%d): " "${#candidates[@]}" >&2
+    local choice
+    read -r choice
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 ]] || [[ "$choice" -gt ${#candidates[@]} ]]; then
+        err "Неверный выбор: $choice"
+        exit 1
+    fi
+
+    echo "${candidates[$((choice-1))]}/memory"
+}
+
 info "Linux setup для Claude Memory Sync"
-info "Репо: $REPO_DIR"
+info "Репо-кит: $REPO_DIR"
 info "Git-память: $GIT_MEMORY"
-info "Claude-память: $CLAUDE_MEMORY"
-echo
 
 if [[ ! -d "$GIT_MEMORY" ]]; then
-    err "Git-репо не найден: $GIT_MEMORY"
-    err "Сначала: git clone https://github.com/DevKitRU/claude-memory-sync.git $REPO_DIR"
+    err "Папки $GIT_MEMORY не существует."
+    err "Попробуй: git clone https://github.com/DevKitRU/claude-memory-sync.git"
     exit 1
 fi
 
-# Если уже симлинк
+CLAUDE_MEMORY="$(discover_claude_memory)"
+info "Claude-память: $CLAUDE_MEMORY"
+echo ""
+
+# ——— Шаг 0: уже симлинк в правильное место?
+SYMLINK_READY=0
 if [[ -L "$CLAUDE_MEMORY" ]]; then
     CURRENT_TARGET=$(readlink "$CLAUDE_MEMORY")
     if [[ "$CURRENT_TARGET" == "$GIT_MEMORY" ]]; then
         ok "Симлинк уже настроен: $CLAUDE_MEMORY → $GIT_MEMORY"
-        exit 0
+        info "Пропускаю шаги 1-4, проверю скил и cron..."
+        SYMLINK_READY=1
     else
         warn "Симлинк ведёт в другое место: $CURRENT_TARGET"
         warn "Пересоздаю..."
@@ -65,42 +114,61 @@ if [[ -L "$CLAUDE_MEMORY" ]]; then
     fi
 fi
 
-info "Шаг 1/6: бэкап"
+if [[ $SYMLINK_READY -eq 0 ]]; then
+
+# ——— Шаг 1: бэкап
+info "Шаг 1/7: бэкап"
 if [[ -d "$CLAUDE_MEMORY" ]]; then
     cp -a "$CLAUDE_MEMORY" "$BACKUP_DIR"
     ok "Бэкап: $BACKUP_DIR"
 else
-    info "Папки памяти Claude не существует — бэкап не нужен"
+    info "Папки памяти Claude ещё нет — бэкап не нужен"
     mkdir -p "$(dirname "$CLAUDE_MEMORY")"
 fi
 
-info "Шаг 2/6: мерж"
-MERGED=0
+# ——— Шаг 2: мерж
+info "Шаг 2/7: мерж уникальных/новых файлов"
+MERGED_NEW=0
+MERGED_OVERWRITE=0
+OVERWRITTEN_FILES=()
 if [[ -d "$CLAUDE_MEMORY" ]]; then
     while IFS= read -r -d '' file; do
         name=$(basename "$file")
         target="$GIT_MEMORY/$name"
         if [[ ! -e "$target" ]]; then
             cp "$file" "$target"
-            echo "  + $name"
-            ((MERGED++))
+            echo "  + $name (новый)"
+            MERGED_NEW=$((MERGED_NEW + 1))
         elif [[ "$file" -nt "$target" ]]; then
             cp "$file" "$target"
-            echo "  ↑ $name"
-            ((MERGED++))
+            echo "  ↑ $name (локальная версия свежее)"
+            OVERWRITTEN_FILES+=("$name")
+            MERGED_OVERWRITE=$((MERGED_OVERWRITE + 1))
         fi
     done < <(find "$CLAUDE_MEMORY" -maxdepth 1 -type f -print0)
 fi
-ok "Смержено: $MERGED файлов"
+if [[ $MERGED_NEW -eq 0 && $MERGED_OVERWRITE -eq 0 ]]; then
+    ok "Все файлы уже в git-репо"
+else
+    ok "Новых: $MERGED_NEW, перезаписано: $MERGED_OVERWRITE"
+    if [[ $MERGED_OVERWRITE -gt 0 ]]; then
+        warn "Перезаписаны версиями из локальной папки (были новее по mtime):"
+        for n in "${OVERWRITTEN_FILES[@]}"; do
+            warn "  - $n"
+        done
+    fi
+fi
 
-info "Шаг 3/6: симлинк"
+# ——— Шаг 3: симлинк
+info "Шаг 3/7: симлинк"
 if [[ -d "$CLAUDE_MEMORY" && ! -L "$CLAUDE_MEMORY" ]]; then
     rm -rf "$CLAUDE_MEMORY"
 fi
 ln -s "$GIT_MEMORY" "$CLAUDE_MEMORY"
 ok "$CLAUDE_MEMORY → $GIT_MEMORY"
 
-info "Шаг 4/6: тест записи"
+# ——— Шаг 4: тест записи
+info "Шаг 4/7: тест записи через симлинк"
 TEST_FILE="$CLAUDE_MEMORY/_symlink_test.tmp"
 echo "test $(date)" > "$TEST_FILE"
 if [[ -f "$GIT_MEMORY/_symlink_test.tmp" ]]; then
@@ -111,33 +179,65 @@ else
     exit 1
 fi
 
+fi   # end of SYMLINK_READY block
+
+# ——— Шаг 5: скил (идемпотентно)
 info "Шаг 5/7: установка скила /setup-memory-sync"
 SKILL_SRC="$REPO_DIR/skills/setup-memory-sync"
 SKILL_DST="$HOME/.claude/skills/setup-memory-sync"
 if [[ -d "$SKILL_SRC" ]]; then
     mkdir -p "$HOME/.claude/skills"
-    if [[ -L "$SKILL_DST" ]]; then rm "$SKILL_DST"
-    elif [[ -d "$SKILL_DST" ]]; then mv "$SKILL_DST" "${SKILL_DST}.backup-$TIMESTAMP"
+    if [[ -L "$SKILL_DST" ]]; then
+        rm "$SKILL_DST"
+    elif [[ -d "$SKILL_DST" ]]; then
+        mv "$SKILL_DST" "${SKILL_DST}.backup-$TIMESTAMP"
     fi
     ln -s "$SKILL_SRC" "$SKILL_DST"
     ok "Скил: $SKILL_DST → $SKILL_SRC"
+else
+    warn "Скил не найден в репо (пропущу)"
 fi
 
+# ——— Шаг 6: cron wrapper-скрипт + запись (идемпотентно)
 info "Шаг 6/7: auto-pull через cron (каждые 5 мин)"
-CRON_CMD="*/5 * * * * cd $REPO_DIR && git pull --quiet >> $HOME/logs/claude-memory-autopull.log 2>&1"
-mkdir -p "$HOME/logs"
 
-# Убираем старую запись если была, добавляем новую
-(crontab -l 2>/dev/null | grep -v "claude-memory.*git pull" || true; echo "$CRON_CMD") | crontab -
-ok "Cron установлен (лог: $HOME/logs/claude-memory-autopull.log)"
+# Пути могут содержать пробелы. Cron не любит экранирование в строке команды,
+# поэтому делаем wrapper-скрипт и кладём в фиксированное место.
+WRAPPER_DIR="$HOME/.local/bin"
+WRAPPER="$WRAPPER_DIR/claude-memory-autopull.sh"
+LOGS_DIR="$HOME/logs"
+LOG_FILE="$LOGS_DIR/claude-memory-autopull.log"
 
+mkdir -p "$WRAPPER_DIR" "$LOGS_DIR"
+
+# git путь — cron не наследует $PATH
+GIT_BIN=$(command -v git || echo "/usr/bin/git")
+
+cat > "$WRAPPER" <<EOF
+#!/usr/bin/env bash
+# Auto-generated by claude-memory-sync/setup/linux.sh — не редактируй вручную.
+cd "$REPO_DIR" || exit 1
+"$GIT_BIN" pull --quiet >> "$LOG_FILE" 2>&1
+EOF
+chmod +x "$WRAPPER"
+
+# Обновляем crontab: убираем любые старые claude-memory записи, добавляем новую
+CRON_LINE="*/5 * * * * $WRAPPER"
+(crontab -l 2>/dev/null | grep -v "claude-memory" || true; echo "$CRON_LINE") | crontab -
+ok "Cron: $CRON_LINE"
+ok "Wrapper: $WRAPPER"
+ok "Лог: $LOG_FILE"
+
+# ——— Шаг 7: итог
 info "Шаг 7/7: готово"
-echo
+echo ""
 ok "Всё настроено."
 echo "  • Claude пишет память напрямую в $GIT_MEMORY"
-echo "  • Cron тянет свежее с GitHub каждые 5 мин"
+echo "  • Cron тянет с GitHub каждые 5 мин через $WRAPPER"
 echo "  • Сохранить: cd $REPO_DIR && git add -A && git commit -m '...' && git push"
-echo "  • Бэкап: $BACKUP_DIR"
-echo
+if [[ $SYMLINK_READY -eq 0 ]]; then
+    echo "  • Бэкап: $BACKUP_DIR"
+fi
+echo ""
 info "Проверка: ./setup/health-check.sh"
 info "Откат: ./setup/rollback.sh"

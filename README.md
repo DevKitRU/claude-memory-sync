@@ -28,8 +28,11 @@ claude-memory-sync/
 │   ├── windows.ps1            ← установка на Windows
 │   ├── health-check.{sh,ps1}  ← проверить что всё работает
 │   └── rollback.{sh,ps1}      ← откат если что-то сломалось
+├── hooks/
+│   └── pre-commit             ← детектор API-ключей, отклоняет коммит с секретом
 └── docs/
     ├── architecture.md        ← как это устроено внутри
+    ├── secrets.md             ← как НЕ слить токены в git
     └── troubleshooting.md     ← FAQ по граблям
 ```
 
@@ -127,6 +130,27 @@ cd E:\projects\claude-memory-sync
 
 ---
 
+## Безопасность: не слейте токены в git
+
+Память Claude = файлы в git. Если Claude «поможет» и запишет API-ключ в memory-файл — он уедет на GitHub и останется в истории коммитов навсегда. Приватный репо это не страховка — коллаборатор / случайный публичный форк / кеш GitHub его увидят.
+
+**Три правила:**
+
+1. **Ключи — в `~/.claude/secrets/api-keys.env` (или secret manager), а не в memory-файлах.** В памяти храни только *где* лежит ключ, не сам ключ.
+2. **Установи pre-commit hook** в свой memory-репо:
+   ```bash
+   # Mac/Linux
+   cp <этот-репо>/hooks/pre-commit <твой-memory-репо>/.git/hooks/
+   chmod +x <твой-memory-репо>/.git/hooks/pre-commit
+   ```
+   Hook ловит 15+ форматов (Anthropic, OpenAI, GitHub PAT, Slack, Telegram, AWS, JWT, SSH private keys). Если что-то нашёл — откажет в коммите.
+3. **Пропиши правило в `CLAUDE.md`** (шаблон в [CLAUDE.md.template](CLAUDE.md.template#L38)):
+   > Ключи хранятся в `~/.claude/secrets/api-keys.env`. В memory-файлах упоминается только *где*, никогда сам ключ.
+
+Полный гайд с паттернами, ротацией, чеклистом для нового репо — [docs/secrets.md](docs/secrets.md).
+
+---
+
 ## Команды на каждый день
 
 | Хочу | Команда |
@@ -150,6 +174,8 @@ cd E:\projects\claude-memory-sync
 
 **Безопасно ли хранить память в GitHub?**
 Репо должен быть **приватным**. Секреты (API-ключи, токены) храни **вне** git-репо памяти — например в `~/.claude/secrets/api-keys.env`. В памяти оставляй только ссылки типа «ключ в `secrets/xxx.env`».
+
+Подробный гайд с паттерном хранения и pre-commit hook — [docs/secrets.md](docs/secrets.md). **Поставь `hooks/pre-commit` в свой memory-репо сразу** — он ловит 15+ форматов API-ключей и отклоняет коммит если что-то утекает. Это не паранойя: история git-репо живёт вечно, даже если удалить файл.
 
 **Windows PowerShell ругается на скрипт с кучей ошибок.**
 Скрипты используют кириллицу. PowerShell 5.1 (дефолт Win10/11) без UTF-8 BOM читает `.ps1` как cp1251 — парсер падает. Скрипты в этом ките уже с BOM. Если переписываешь — сохраняй как **UTF-8 with BOM**.

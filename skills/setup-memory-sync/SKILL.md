@@ -1,6 +1,6 @@
 ---
 name: setup-memory-sync
-description: Установка синхронизации памяти Claude Code между Mac/Linux/Windows через приватный git-репо пользователя. Запускать когда пользователь просит настроить memory sync, починить симлинк, поднять новую машину, либо при вызове команды "/setup-memory-sync".
+description: Установка или починка синхронизации папки памяти Claude Code (`~/.claude/projects/<hash>/memory`) через симлинк на git-репо claude-memory-sync. Запускать ТОЛЬКО при явном упоминании "memory sync", "синхронизация памяти Claude", "симлинк на claude-memory", "сломался симлинк памяти", или при вызове "/setup-memory-sync". НЕ запускать на общие вопросы про "настроить новую машину" или "установить Claude Code".
 ---
 
 # Setup Memory Sync

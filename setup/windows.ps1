@@ -4,21 +4,20 @@
     Claude Memory Sync — Windows setup.
 
 .DESCRIPTION
-    Превращает локальную папку памяти Claude в Junction на git-репо claude-memory.
+    Превращает локальную папку памяти Claude в Junction на git-репо с твоей памятью.
     Идемпотентен: повторный запуск не ломает.
 
     Использование:
-        cd E:\projects\claude-memory    (или где клонирован репо)
+        cd E:\projects\claude-memory-sync    (или где клонирован этот кит)
         .\setup\windows.ps1
 
     Что делает:
-    1. Проверяет что git-репо на месте
-    2. Находит папку памяти Claude (%USERPROFILE%\.claude\projects\e--projects\memory)
-    3. Бэкапит её в %USERPROFILE%\claude-memory-backup-<timestamp>
-    4. Мержит уникальные файлы в git-репо
-    5. Заменяет папку Junction'ом на git-репо
-    6. Настраивает Task Scheduler для auto-pull каждые 5 мин
-    7. Тестирует запись через Junction
+    1. Находит активную папку памяти Claude (discovery — не хардкод).
+    2. Бэкапит её в %USERPROFILE%\claude-memory-backup-<timestamp>.
+    3. Мержит уникальные/новые файлы в git-репо.
+    4. Заменяет папку Junction'ом на git-репо.
+    5. Настраивает Task Scheduler для auto-pull каждые 5 мин.
+    6. Тестирует запись через Junction.
 
     Junction не требует прав администратора (в отличие от Symbolic Link).
 #>
@@ -35,29 +34,85 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoDir   = Split-Path -Parent $ScriptDir
 $GitMemory = Join-Path $RepoDir "memory"
 
-$ClaudeMemory = Join-Path $env:USERPROFILE ".claude\projects\e--projects\memory"
-$Timestamp    = Get-Date -Format "yyyyMMdd-HHmmss"
-$BackupDir    = Join-Path $env:USERPROFILE "claude-memory-backup-$Timestamp"
+$Timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$BackupDir = Join-Path $env:USERPROFILE "claude-memory-backup-$Timestamp"
+
+# ——— Discovery активной папки памяти Claude
+# Claude Code создаёт %USERPROFILE%\.claude\projects\<encoded-path>\memory под каждую
+# рабочую директорию. Имя папки генерируется из абсолютного пути. Мы находим её
+# через перебор, а не хардкодим.
+function Find-ClaudeMemory {
+    $projectsDir = Join-Path $env:USERPROFILE ".claude\projects"
+
+    if (-not (Test-Path $projectsDir)) {
+        Write-Err "Папка проектов Claude не найдена: $projectsDir"
+        Write-Err ""
+        Write-Err "Это значит что Claude Code ещё не запускался на этой машине."
+        Write-Err "Запусти Claude Code хотя бы раз:"
+        Write-Err "  cd <куда будешь работать с памятью>"
+        Write-Err "  claude"
+        Write-Err "Потом запусти этот скрипт снова."
+        exit 1
+    }
+
+    $candidates = @(Get-ChildItem $projectsDir -Directory -ErrorAction SilentlyContinue)
+
+    if ($candidates.Count -eq 0) {
+        Write-Err "В $projectsDir нет ни одного проекта Claude."
+        Write-Err "Запусти Claude Code хотя бы раз, потом этот скрипт снова."
+        exit 1
+    }
+
+    if ($candidates.Count -eq 1) {
+        return (Join-Path $candidates[0].FullName "memory")
+    }
+
+    # Несколько — спрашиваем
+    Write-Host ""
+    Write-Host "Claude Code запускался из нескольких директорий." -ForegroundColor Yellow
+    Write-Host "Выбери ту из которой хочешь синхронизировать память:" -ForegroundColor Yellow
+    Write-Host ""
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $name = $candidates[$i].Name
+        $decoded = $name -replace '^-', '' -replace '-', '\'
+        Write-Host ("  {0}) {1}" -f ($i + 1), $name)
+        Write-Host ("       = {0}" -f $decoded) -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    $choice = Read-Host "Номер (1-$($candidates.Count))"
+
+    $choiceInt = 0
+    if (-not [int]::TryParse($choice, [ref]$choiceInt) -or $choiceInt -lt 1 -or $choiceInt -gt $candidates.Count) {
+        Write-Err "Неверный выбор: $choice"
+        exit 1
+    }
+
+    return (Join-Path $candidates[$choiceInt - 1].FullName "memory")
+}
 
 Write-Info "Windows setup для Claude Memory Sync"
-Write-Info "Репо: $RepoDir"
+Write-Info "Репо-кит: $RepoDir"
 Write-Info "Git-память: $GitMemory"
-Write-Info "Claude-память: $ClaudeMemory"
-Write-Host ""
 
 if (-not (Test-Path $GitMemory)) {
-    Write-Err "Git-репо не найден: $GitMemory"
-    Write-Err "Сначала: git clone https://github.com/DevKitRU/claude-memory-sync.git $RepoDir"
+    Write-Err "Папки $GitMemory не существует."
+    Write-Err "Попробуй: git clone https://github.com/DevKitRU/claude-memory-sync.git"
     exit 1
 }
 
-# ——— Шаг 0: уже Junction?
+$ClaudeMemory = Find-ClaudeMemory
+Write-Info "Claude-память: $ClaudeMemory"
+Write-Host ""
+
+# ——— Шаг 0: уже Junction в правильное место?
+$JunctionReady = $false
 if (Test-Path $ClaudeMemory) {
     $item = Get-Item $ClaudeMemory -Force
     if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
         if ($item.Target -eq $GitMemory) {
             Write-Ok "Junction уже настроен: $ClaudeMemory -> $GitMemory"
-            exit 0
+            Write-Info "Пропускаю шаги 1-4, проверю скил и Task Scheduler..."
+            $JunctionReady = $true
         } else {
             Write-WarnMsg "Junction ведёт в другое место: $($item.Target)"
             Write-WarnMsg "Пересоздаю..."
@@ -66,63 +121,84 @@ if (Test-Path $ClaudeMemory) {
     }
 }
 
-# ——— Шаг 1: бэкап
-Write-Info "Шаг 1/6: бэкап"
-if (Test-Path $ClaudeMemory) {
-    Copy-Item -Path $ClaudeMemory -Destination $BackupDir -Recurse -Force
-    Write-Ok "Бэкап: $BackupDir"
-} else {
-    Write-Info "Папки памяти Claude не существует"
-    $parent = Split-Path $ClaudeMemory -Parent
-    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-}
+if (-not $JunctionReady) {
 
-# ——— Шаг 2: мерж
-Write-Info "Шаг 2/6: мерж"
-$merged = 0
-if (Test-Path $ClaudeMemory) {
-    Get-ChildItem $ClaudeMemory -File | ForEach-Object {
-        $target = Join-Path $GitMemory $_.Name
-        if (-not (Test-Path $target)) {
-            Copy-Item $_.FullName $target
-            Write-Host "  + $($_.Name)"
-            $merged++
-        } elseif ($_.LastWriteTime -gt (Get-Item $target).LastWriteTime) {
-            Copy-Item $_.FullName $target -Force
-            Write-Host "  > $($_.Name)"
-            $merged++
+    # ——— Шаг 1: бэкап
+    Write-Info "Шаг 1/7: бэкап текущей папки памяти"
+    if (Test-Path $ClaudeMemory) {
+        Copy-Item -Path $ClaudeMemory -Destination $BackupDir -Recurse -Force
+        Write-Ok "Бэкап: $BackupDir"
+    } else {
+        Write-Info "Папки памяти Claude ещё нет — бэкап не нужен"
+        $parent = Split-Path $ClaudeMemory -Parent
+        if (-not (Test-Path $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
         }
     }
-}
-Write-Ok "Смержено: $merged файлов"
 
-# ——— Шаг 3: удалить и создать Junction
-Write-Info "Шаг 3/6: Junction"
-if (Test-Path $ClaudeMemory) {
-    Remove-Item $ClaudeMemory -Recurse -Force
-}
-New-Item -ItemType Junction -Path $ClaudeMemory -Target $GitMemory | Out-Null
-Write-Ok "$ClaudeMemory -> $GitMemory"
+    # ——— Шаг 2: мерж
+    Write-Info "Шаг 2/7: мерж уникальных/новых файлов"
+    $mergedNew = 0
+    $mergedOverwrite = 0
+    $overwrittenFiles = @()
+    if (Test-Path $ClaudeMemory) {
+        Get-ChildItem $ClaudeMemory -File | ForEach-Object {
+            $target = Join-Path $GitMemory $_.Name
+            if (-not (Test-Path $target)) {
+                Copy-Item $_.FullName $target
+                Write-Host "  + $($_.Name) (новый)"
+                $script:mergedNew++
+            } elseif ($_.LastWriteTime -gt (Get-Item $target).LastWriteTime) {
+                Copy-Item $_.FullName $target -Force
+                Write-Host "  ^ $($_.Name) (локальная версия свежее)"
+                $script:overwrittenFiles += $_.Name
+                $script:mergedOverwrite++
+            }
+        }
+    }
+    if ($mergedNew -eq 0 -and $mergedOverwrite -eq 0) {
+        Write-Ok "Все файлы уже в git-репо"
+    } else {
+        Write-Ok "Новых: $mergedNew, перезаписано: $mergedOverwrite"
+        if ($mergedOverwrite -gt 0) {
+            Write-WarnMsg "Перезаписаны версиями из локальной папки (новее по mtime):"
+            foreach ($n in $overwrittenFiles) {
+                Write-WarnMsg "  - $n"
+            }
+        }
+    }
 
-# ——— Шаг 4: тест записи
-Write-Info "Шаг 4/6: тест записи"
-$testFile = Join-Path $ClaudeMemory "_junction_test.tmp"
-"test $(Get-Date)" | Out-File $testFile -Encoding UTF8
-if (Test-Path (Join-Path $GitMemory "_junction_test.tmp")) {
-    Write-Ok "Работает"
-    Remove-Item $testFile
-} else {
-    Write-Err "Junction не работает"
-    exit 1
-}
+    # ——— Шаг 3: удалить и создать Junction
+    Write-Info "Шаг 3/7: Junction"
+    if (Test-Path $ClaudeMemory) {
+        Remove-Item $ClaudeMemory -Recurse -Force
+    }
+    New-Item -ItemType Junction -Path $ClaudeMemory -Target $GitMemory | Out-Null
+    Write-Ok "$ClaudeMemory -> $GitMemory"
 
-# ——— Шаг 5: скил
+    # ——— Шаг 4: тест записи
+    Write-Info "Шаг 4/7: тест записи через Junction"
+    $testFile = Join-Path $ClaudeMemory "_junction_test.tmp"
+    "test $(Get-Date)" | Out-File $testFile -Encoding UTF8
+    if (Test-Path (Join-Path $GitMemory "_junction_test.tmp")) {
+        Write-Ok "Запись через Junction работает"
+        Remove-Item $testFile
+    } else {
+        Write-Err "Junction не работает"
+        exit 1
+    }
+
+}   # end of JunctionReady block
+
+# ——— Шаг 5: скил (идемпотентно)
 Write-Info "Шаг 5/7: установка скила /setup-memory-sync"
 $SkillSrc = Join-Path $RepoDir "skills\setup-memory-sync"
 $SkillDst = Join-Path $env:USERPROFILE ".claude\skills\setup-memory-sync"
 if (Test-Path $SkillSrc) {
     $skillsParent = Join-Path $env:USERPROFILE ".claude\skills"
-    if (-not (Test-Path $skillsParent)) { New-Item -ItemType Directory -Path $skillsParent -Force | Out-Null }
+    if (-not (Test-Path $skillsParent)) {
+        New-Item -ItemType Directory -Path $skillsParent -Force | Out-Null
+    }
     if (Test-Path $SkillDst) {
         $skItem = Get-Item $SkillDst -Force
         if ($skItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
@@ -133,9 +209,11 @@ if (Test-Path $SkillSrc) {
     }
     New-Item -ItemType Junction -Path $SkillDst -Target $SkillSrc | Out-Null
     Write-Ok "Скил: $SkillDst -> $SkillSrc"
+} else {
+    Write-WarnMsg "Скил не найден в репо (пропущу)"
 }
 
-# ——— Шаг 6: Task Scheduler
+# ——— Шаг 6: Task Scheduler (идемпотентно)
 Write-Info "Шаг 6/7: Task Scheduler (auto-pull каждые 5 мин)"
 $TaskName = "ClaudeMemoryAutoPull"
 $LogPath  = Join-Path $env:LOCALAPPDATA "claude-memory-autopull.log"
@@ -166,7 +244,8 @@ Register-ScheduledTask `
     -Principal $principal `
     -Description "Auto-pull Claude памяти с GitHub каждые 5 мин" | Out-Null
 
-Write-Ok "Task '$TaskName' создана (лог: $LogPath)"
+Write-Ok "Task: $TaskName"
+Write-Ok "Лог: $LogPath"
 
 # ——— Шаг 7: итог
 Write-Info "Шаг 7/7: готово"
@@ -175,7 +254,9 @@ Write-Ok "Всё настроено."
 Write-Host "  - Claude пишет память напрямую в $GitMemory"
 Write-Host "  - Task Scheduler тянет свежее с GitHub каждые 5 мин"
 Write-Host "  - Сохранить: cd $RepoDir ; git add -A ; git commit -m '...' ; git push"
-Write-Host "  - Бэкап: $BackupDir"
+if (-not $JunctionReady) {
+    Write-Host "  - Бэкап: $BackupDir (удали через пару дней когда убедишься что всё работает)"
+}
 Write-Host ""
 Write-Info "Проверка: .\setup\health-check.ps1"
 Write-Info "Откат:    .\setup\rollback.ps1"
