@@ -84,7 +84,7 @@ git commit -m 'update memory'
 git push
 ```
 
-На других машинах auto-pull (cron/launchd/Task Scheduler) тянет изменения каждые 5 мин автоматически.
+На других машинах smart auto-pull (cron/launchd/Task Scheduler) тянет изменения раз в 15 мин автоматически.
 
 ## Полезные скилы
 

@@ -86,7 +86,7 @@ cd E:\projects\claude-memory
 | Что хочу | Команда |
 |---|---|
 | Сохранить свежую память на GitHub | `cd claude-memory && git add -A && git commit -m "update" && git push` |
-| Подтянуть свежее с GitHub | `cd claude-memory && git pull` (или auto-pull сам — каждые 5 мин) |
+| Подтянуть свежее с GitHub | `cd claude-memory && git pull` (или smart auto-pull сам — раз в 15 мин) |
 | Проверить что всё работает | `./setup/health-check.sh` |
 | Откатить если что-то сломалось | `./setup/rollback.sh` |
 

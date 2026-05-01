@@ -16,7 +16,7 @@
     2. Бэкапит её в %USERPROFILE%\claude-memory-backup-<timestamp>.
     3. Мержит уникальные/новые файлы в git-репо.
     4. Заменяет папку Junction'ом на git-репо.
-    5. Настраивает Task Scheduler для auto-pull каждые 5 мин.
+    5. Настраивает Task Scheduler для smart auto-pull раз в 15 мин.
     6. Тестирует запись через Junction.
 
     Junction не требует прав администратора (в отличие от Symbolic Link).
@@ -220,18 +220,125 @@ if (Test-Path $SkillsSrc) {
 }
 
 # ——— Шаг 6: Task Scheduler (идемпотентно)
-Write-Info "Шаг 6/7: Task Scheduler (auto-pull каждые 5 мин)"
+Write-Info "Шаг 6/7: Task Scheduler (smart auto-pull)"
 $TaskName = "ClaudeMemoryAutoPull"
-$LogPath  = Join-Path $env:LOCALAPPDATA "claude-memory-autopull.log"
+$LogPath  = Join-Path $env:LOCALAPPDATA "claude-memory-smartpull.log"
+$SmartPullPath = Join-Path $env:LOCALAPPDATA "ClaudeMemorySmartPull.ps1"
+$RepoDirLiteral = $RepoDir.Replace("'", "''")
+
+$SmartPull = @"
+`$ErrorActionPreference = "Stop"
+
+`$RepoDir = '$RepoDirLiteral'
+`$LogPath = Join-Path `$env:LOCALAPPDATA "claude-memory-smartpull.log"
+`$GameProcessHints = @(
+    "bf2042", "battlefield", "exefile", "eve", "albion",
+    "dune", "riftbreaker", "steamvr", "vrserver",
+    "vrcompositor", "vrmonitor"
+)
+
+function Write-SmartLog {
+    param([string]`$Message)
+    `$stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "`$stamp `$Message" | Out-File -FilePath `$LogPath -Encoding utf8 -Append
+}
+
+function Test-GameRunning {
+    `$processes = Get-Process -ErrorAction SilentlyContinue
+    foreach (`$p in `$processes) {
+        `$name = `$p.ProcessName.ToLowerInvariant()
+        foreach (`$hint in `$GameProcessHints) {
+            if (`$name.Contains(`$hint)) { return `$true }
+        }
+    }
+    return `$false
+}
+
+try {
+    [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = "BelowNormal"
+} catch {
+    Write-SmartLog "WARN could not lower priority: `$(`$_.Exception.Message)"
+}
+
+try {
+    if (-not (Test-Path -LiteralPath `$RepoDir)) {
+        Write-SmartLog "SKIP repo missing: `$RepoDir"
+        exit 0
+    }
+
+    if (Test-GameRunning) {
+        Write-SmartLog "SKIP game/VR process detected"
+        exit 0
+    }
+
+    `$cpuLoad = @(Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | ForEach-Object { `$_.LoadPercentage } | Measure-Object -Average).Average
+    if (`$null -ne `$cpuLoad -and `$cpuLoad -ge 35) {
+        Write-SmartLog "SKIP high CPU load: `$([int]`$cpuLoad)%"
+        exit 0
+    }
+
+    if (@(Get-Process -Name git -ErrorAction SilentlyContinue).Count -gt 0) {
+        Write-SmartLog "SKIP another git process is running"
+        exit 0
+    }
+
+    `$dirty = git -C `$RepoDir status --porcelain
+    if (`$LASTEXITCODE -ne 0) {
+        Write-SmartLog "ERROR git status failed"
+        exit 0
+    }
+
+    if (`$dirty) {
+        Write-SmartLog "SKIP local changes present; manual save/pull needed"
+        exit 0
+    }
+
+    git -C `$RepoDir fetch --quiet --prune
+    if (`$LASTEXITCODE -ne 0) {
+        Write-SmartLog "ERROR git fetch failed"
+        exit 0
+    }
+
+    `$counts = (git -C `$RepoDir rev-list --left-right --count "@{u}...HEAD").Trim() -split "\s+"
+    if (`$LASTEXITCODE -ne 0 -or `$counts.Count -lt 2) {
+        Write-SmartLog "ERROR rev-list failed"
+        exit 0
+    }
+
+    `$behind = [int]`$counts[0]
+    `$ahead = [int]`$counts[1]
+
+    if (`$behind -eq 0) {
+        Write-SmartLog "OK up-to-date ahead=`$ahead"
+        exit 0
+    }
+
+    if (`$ahead -gt 0) {
+        Write-SmartLog "SKIP local commits ahead=`$ahead behind=`$behind; manual rebase needed"
+        exit 0
+    }
+
+    git -C `$RepoDir pull --ff-only --quiet
+    if (`$LASTEXITCODE -eq 0) {
+        Write-SmartLog "OK pulled behind=`$behind"
+    } else {
+        Write-SmartLog "ERROR git pull failed"
+    }
+} catch {
+    Write-SmartLog "ERROR `$(`$_.Exception.Message)"
+}
+"@
+
+$SmartPull | Set-Content -LiteralPath $SmartPullPath -Encoding UTF8
 
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-$psArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"cd '$RepoDir'; git pull --quiet *>> '$LogPath'`""
+$psArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$SmartPullPath`""
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $psArgs
 
 $startTime = (Get-Date).AddMinutes(1)
 $trigger = New-ScheduledTaskTrigger -Once -At $startTime `
-    -RepetitionInterval (New-TimeSpan -Minutes 5) `
+    -RepetitionInterval (New-TimeSpan -Minutes 15) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $settings = New-ScheduledTaskSettingsSet `
@@ -248,9 +355,10 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Auto-pull Claude памяти с GitHub каждые 5 мин" | Out-Null
+    -Description "Smart auto-pull Claude memory; skips games, dirty repo, and busy git" | Out-Null
 
 Write-Ok "Task: $TaskName"
+Write-Ok "Wrapper: $SmartPullPath"
 Write-Ok "Лог: $LogPath"
 
 # ——— Шаг 7: итог
@@ -258,7 +366,7 @@ Write-Info "Шаг 7/7: готово"
 Write-Host ""
 Write-Ok "Всё настроено."
 Write-Host "  - Claude пишет память напрямую в $GitMemory"
-Write-Host "  - Task Scheduler тянет свежее с GitHub каждые 5 мин"
+Write-Host "  - Task Scheduler запускает smart auto-pull раз в 15 мин"
 Write-Host "  - Сохранить: cd $RepoDir ; git add -A ; git commit -m '...' ; git push"
 if (-not $JunctionReady) {
     Write-Host "  - Бэкап: $BackupDir (удали через пару дней когда убедишься что всё работает)"

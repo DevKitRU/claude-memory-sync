@@ -11,7 +11,7 @@ Claude Code хранит память в локальной папке на ка
 
 ```
 Mac    ↘
-Linux   → GitHub (приватный claude-memory репо) ← git pull каждые 5 мин
+Linux   → GitHub (приватный claude-memory репо) ← smart pull раз в 15 мин
 Windows↗
 ```
 
@@ -39,7 +39,7 @@ Windows↗
 1. Делает бэкап локальной папки памяти в домашнюю директорию (например `~/claude-memory-backup-<timestamp>`).
 2. Мержит уникальные локальные файлы в git-репо (чтобы не потерять заметки).
 3. Заменяет локальную папку на симлинк (или Junction на Windows) к git-репо.
-4. Настраивает auto-pull: cron на Mac/Linux, Task Scheduler на Windows.
+4. Настраивает smart auto-pull: LaunchAgent на Mac, cron на Linux, Task Scheduler на Windows.
 5. Тестирует запись через симлинк.
 
 ## Инструкции для Claude
