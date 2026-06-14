@@ -8,6 +8,14 @@ Claude Code хранит память (`MEMORY.md` + заметки) в лока
 
 ---
 
+## AI context для Codex / Claude
+
+Если открываешь этот репозиторий через AI-агента, начни с [AGENTS.md](AGENTS.md), затем с [docs/ai_context/PROJECT_MAP.md](docs/ai_context/PROJECT_MAP.md).
+
+Там коротко описано, где setup scripts, hooks, templates, rollback и danger zones: реальные memory repos, секреты, symlink/Junction и auto-pull.
+
+---
+
 ## Что внутри
 
 ```
